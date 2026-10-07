@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ліфт — стан акумулятора</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1a1d2e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Ліфт">
+<link rel="apple-touch-icon" href="icon.png">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0f1117;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+
+  .card {
+    background: #1a1d2e;
+    border-radius: 20px;
+    padding: 36px 40px;
+    max-width: 420px;
+    width: 100%;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+    text-align: center;
+  }
+
+  h1 {
+    font-size: 1.1rem;
+    color: #888;
+    font-weight: 500;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 28px;
+  }
+
+  .soc-ring {
+    position: relative;
+    width: 180px;
+    height: 180px;
+    margin: 0 auto 28px;
+  }
+
+  .soc-ring svg {
+    transform: rotate(-90deg);
+  }
+
+  .soc-ring .track {
+    fill: none;
+    stroke: #2a2d3e;
+    stroke-width: 12;
+  }
+
+  .soc-ring .fill {
+    fill: none;
+    stroke-width: 12;
+    stroke-linecap: round;
+    transition: stroke-dashoffset 1s ease, stroke 0.5s;
+  }
+
+  .soc-label {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 2.8rem;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .soc-unit {
+    font-size: 1rem;
+    color: #888;
+    font-weight: 400;
+  }
+
+  .status-badge {
+    display: inline-block;
+    padding: 8px 20px;
+    border-radius: 100px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 24px;
+  }
+
+  .status-ok     { background: #1a3a2a; color: #4ade80; }
+  .status-warn   { background: #3a3010; color: #facc15; }
+  .status-orange { background: #3a2010; color: #fb923c; }
+  .status-danger { background: #3a1010; color: #f87171; }
+  .status-offline{ background: #2a2a2a; color: #9ca3af; }
+
+  .meta {
+    font-size: 0.8rem;
+    color: #555;
+    margin-top: 20px;
+  }
+
+  .refresh-btn {
+    margin-top: 24px;
+    background: #2a2d3e;
+    border: none;
+    color: #aaa;
+    padding: 10px 24px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: background 0.2s;
+  }
+  .refresh-btn:hover { background: #353849; color: #fff; }
+  .refresh-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .error { color: #f87171; font-size: 0.9rem; margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Резервне живлення</h1>
+
+  <div class="soc-ring">
+    <svg viewBox="0 0 180 180" width="180" height="180">
+      <circle class="track" cx="90" cy="90" r="74"/>
+      <circle class="fill" id="ring" cx="90" cy="90" r="74"
+        stroke-dasharray="465"
+        stroke-dashoffset="465"
+        stroke="#4ade80"/>
+    </svg>
+    <div class="soc-label">
+      <span id="soc-value">—</span><span class="soc-unit">%</span>
+    </div>
+  </div>
+
+  <div id="badge" class="status-badge status-offline">Завантаження...</div>
+
+  <div class="meta" id="updated">Оновлення...</div>
+
+  <button class="refresh-btn" id="refresh-btn" onclick="loadData()">↻ Оновити</button>
+  <div class="error" id="error"></div>
+</div>
+
+<script>
+const GIST_ID = "2c33101cb8478dde59acc26e25faf9b1";
+const URL = `https://api.github.com/gists/${GIST_ID}`;
+
+const STATES = {
+  0: { label: "✅ Мережа, все добре",   cls: "status-ok",     color: "#4ade80" },
+  1: { label: "🟡 Акумулятор",          cls: "status-warn",   color: "#facc15" },
+  2: { label: "🟠 Заряд обмежений",     cls: "status-orange", color: "#fb923c" },
+  3: { label: "🔴 Критичний заряд!",    cls: "status-danger", color: "#f87171" },
+  4: { label: "📡 Зв'язок втрачено",    cls: "status-offline",color: "#9ca3af" },
+};
+
+async function loadData() {
+  const btn = document.getElementById("refresh-btn");
+  btn.textContent = "⏳ Завантаження...";
+  btn.disabled = true;
+  document.getElementById("error").textContent = "";
+  try {
+    const res = await fetch(`${URL}?nocache=${new Date().getTime()}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const gist = await res.json();
+    const data = JSON.parse(gist.files["state.json"].content);
+
+    const soc   = data.last_soc ?? null;
+    const st    = data.state ?? 0;
+    const ts    = data.last_update ?? null;
+    const info  = STATES[st] ?? STATES[0];
+
+    // SOC відсоток
+    const socEl = document.getElementById("soc-value");
+    const ring  = document.getElementById("ring");
+    if (soc !== null && st !== 4) {
+      socEl.textContent = Math.round(soc);
+      const circumference = 465;
+      const offset = circumference - (soc / 100) * circumference;
+      ring.style.strokeDashoffset = offset;
+      ring.style.stroke = info.color;
+    } else {
+      socEl.textContent = "—";
+      ring.style.strokeDashoffset = 465;
+    }
+
+    // Значок статусу
+    const badge = document.getElementById("badge");
+    badge.textContent = info.label;
+    badge.className = "status-badge " + info.cls;
+
+    // Час оновлення
+    if (ts) {
+      const d = new Date(ts * 1000);
+      document.getElementById("updated").textContent =
+        "Дані станом на: " + d.toLocaleString("uk-UA");
+    }
+
+  } catch (e) {
+    document.getElementById("error").textContent = "Помилка завантаження: " + e.message;
+  } finally {
+    btn.textContent = "↻ Оновити";
+    btn.disabled = false;
+  }
+}
+
+loadData();
+// Автооновлення кожні 10 хвилини
+setInterval(loadData, 600000);
+</script>
+</body>
+</html>
