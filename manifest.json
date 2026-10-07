@@ -1,6 +1,7 @@
 {
   "name": "Резервне живлення · Dmytrivska",
   "short_name": "Ліфт Dmytrivska",
+  "id": "/inverter-battery-monitor-Dmytrivska/dashboard.html",
   "description": "Моніторинг заряду акумулятора ліфта",
   "start_url": "/inverter-battery-monitor-Dmytrivska/dashboard.html",
   "display": "standalone",
@@ -18,5 +19,6 @@
       "sizes": "512x512",
       "type": "image/png"
     }
-  ]
+  ],
+  "scope": "/inverter-battery-monitor-Dmytrivska/"
 }
