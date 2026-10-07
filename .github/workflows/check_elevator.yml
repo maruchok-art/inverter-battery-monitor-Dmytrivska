@@ -1,0 +1,37 @@
+name: Check Elevator Battery
+
+on:
+  workflow_dispatch: # Дозволяє запустити скрипт вручну кнопкою
+  repository_dispatch:
+    types: [trigger]
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: pip install requests
+
+    - name: Run battery check script
+      env:
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        SOLARMAN_APP_ID: ${{ secrets.SOLARMAN_APP_ID }}
+        SOLARMAN_APP_SECRET: ${{ secrets.SOLARMAN_APP_SECRET }}
+        SOLARMAN_EMAIL: ${{ secrets.SOLARMAN_EMAIL }}
+        SOLARMAN_PASSWORD: ${{ secrets.SOLARMAN_PASSWORD }}
+        DEVICE_SN: ${{ secrets.DEVICE_SN }}
+        GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+        GIST_ID: ${{ secrets.GIST_ID }}
+      run: python main.py
