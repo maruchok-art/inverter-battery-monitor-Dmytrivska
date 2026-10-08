@@ -36,7 +36,7 @@ def send_telegram_message(text, silent=False):
 
 # --- РОБОТА З GITHUB GIST ---
 def get_state():
-    default_state = {"state": 0, "token": "", "token_time": 0}
+    default_state = {"state": 0, "tg_state": 0, "token": "", "token_time": 0}
     try:
         headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
         res = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
@@ -86,7 +86,7 @@ def fetch_new_token():
     return None
 
 
-def fetch_soc_data(token):
+def fetch_inverter_data(token):
     if not token:
         return None
     url = f"{API_URL}/v1.0/device/latest?appId={SOLARMAN_APP_ID}"
@@ -103,27 +103,29 @@ def fetch_soc_data(token):
         if not data_list:
             return None
         device_data = data_list[0]
-
-        # === ТЕСТОВИЙ БЛОК ЛОГУВАННЯ ===
-        logging.info("--- ПОЧАТОК ДАНИХ ІНВЕРТОРА ---")
-        for item in device_data.get("dataList", []):
-            logging.info(f"Ключ: {item.get('key')} = {item.get('value')}")
-        logging.info("--- КІНЕЦЬ ДАНИХ ІНВЕРТОРА ---")
-        # ===============================
-
         if str(device_data.get("deviceState", "")) == "2":
-            return None
+            return "OFFLINE"
+
+        soc = None
+        grid_v = 230.0 # Дефолтне значення про всяк випадок
 
         for item in device_data.get("dataList", []):
             key = str(item.get("key", "")).upper()
             if key in ["SOC", "BATTERY_SOC", "BMS_SOC"]:
-                return float(item.get("value", 100))
-        return None
+                soc = float(item.get("value", 100))
+            elif key == "GRIDVOLTAGEL1":
+                grid_v = float(item.get("value", 0))
+
+        if soc is None:
+            return None
+            
+        return {"soc": soc, "grid_v": grid_v}
     except Exception as e:
         logging.error(f"Помилка запиту даних: {e}")
         return None
 
-def get_battery_soc_with_retry(state, max_retries=3, delay=15):
+
+def get_inverter_data_with_retry(state, max_retries=3, delay=15):
     for attempt in range(max_retries):
         token = state.get("token", "")
         token_time = state.get("token_time", 0)
@@ -136,13 +138,15 @@ def get_battery_soc_with_retry(state, max_retries=3, delay=15):
                 state["token_time"] = time.time()
 
         if token:
-            soc = fetch_soc_data(token)
-            if soc == "AUTH_ERROR":
+            data = fetch_inverter_data(token)
+            if data == "AUTH_ERROR":
                 logging.info("Токен відхилено. Оновлюємо...")
                 state["token"] = ""
                 continue
-            elif soc is not None:
-                return soc
+            elif data == "OFFLINE":
+                return "OFFLINE"
+            elif data is not None:
+                return data
 
         logging.warning(f"API Deye не відповів (спроба {attempt+1}/3). Чекаємо {delay} сек...")
         if attempt < max_retries - 1:
@@ -154,69 +158,86 @@ def get_battery_soc_with_retry(state, max_retries=3, delay=15):
 # --- ГОЛОВНА ЛОГІКА ---
 def main():
     state = get_state()
-    current_state_level = state.get("state", 0)
+    # Міграція: якщо tg_state ще немає в пам'яті, беремо старе значення state
+    current_tg_state = state.get("tg_state", state.get("state", 0))
 
-    soc = get_battery_soc_with_retry(state)
-    logging.info(f"Отримано SOC: {soc}, Поточний рівень тривоги: {current_state_level}")
-
-    # 1. Визначаємо, який стан МАЄ БУТИ зараз
-    if soc == "OFFLINE":
-        new_state = 4
-    elif soc <= 30:
-        new_state = 3
-    elif soc <= 50:
-        new_state = 2
-    elif soc <= 90:
-        new_state = 1
+    inverter_data = get_inverter_data_with_retry(state)
+    
+    if inverter_data == "OFFLINE":
+        soc = state.get("last_soc", "Невідомо")
+        logging.info(f"Статус: OFFLINE. Поточний рівень тривоги TG: {current_tg_state}")
+        new_tg_state = 4
+        dash_state = 4
     else:
-        new_state = 0
+        soc = inverter_data["soc"]
+        grid_v = inverter_data["grid_v"]
+        logging.info(f"SOC: {soc}%, Напруга: {grid_v}V, Тривога TG: {current_tg_state}")
 
-    # 2. Якщо були в стані OFFLINE, а зараз отримали реальні дані — повідомляємо про відновлення
-    if current_state_level == 4 and new_state != 4:
+        # --- 1. Логіка ТІЛЬКИ для ТЕЛЕГРАМУ (Абсолютно як було у main_2.py) ---
+        if soc <= 30:
+            new_tg_state = 3
+        elif soc <= 50:
+            new_tg_state = 2
+        elif soc <= 90:
+            new_tg_state = 1
+        else:
+            new_tg_state = 0
+
+        # --- 2. Логіка ТІЛЬКИ для ДАШБОРДА (Відображає реальну напругу) ---
+        if grid_v < 100:  # Світла немає
+            if soc <= 30: dash_state = 3
+            elif soc <= 50: dash_state = 2
+            else: dash_state = 1
+        else:  # Світло є
+            dash_state = 0
+
+    # 3. Якщо були в стані OFFLINE, а зараз отримали реальні дані — повідомляємо про відновлення (Як у main_2.py)
+    if current_tg_state == 4 and new_tg_state != 4:
         msg = (f"✅ <b>Зв'язок з інвертором відновлено!</b>\n\n"
                f"Поточний заряд акумулятора ліфта: <b>{soc}%</b>")
         send_telegram_message(msg)
-        current_state_level = 0
-        state["state"] = 0
+        current_tg_state = 0
+        state["tg_state"] = 0
 
-    # 3. Якщо стан змінився — реагуємо
-    if new_state != current_state_level:
+    # 4. Якщо стан змінився — реагуємо (Як у main_2.py)
+    if new_tg_state != current_tg_state:
 
-        if new_state == 4:
+        if new_tg_state == 4:
             msg = (f"⚠️ <b>Увага! Втрачено зв'язок з інвертором ліфта.</b>\n\n"
                    f"Дані про заряд не оновлюються (можливо, зник інтернет або живлення роутера). "
                    f"Будь ласка, будьте обережні з ліфтом!")
             send_telegram_message(msg)
 
-        elif new_state == 3 and current_state_level < 3:
+        elif new_tg_state == 3 and current_tg_state < 3:
             msg = (f"🔴 ⛔️ <b>КРИТИЧНИЙ ЗАРЯД ({soc}%)! НЕ СІДАЙТЕ В ЛІФТ!</b> ⛔️\n\n"
                    f"Є високий ризик зупинки кабіни між поверхами.")
             send_telegram_message(msg, silent=False)
 
-        elif new_state == 2 and current_state_level < 2:
+        elif new_tg_state == 2 and current_tg_state < 2:
             msg = (f"🟠 <b>Заряд акумулятора ліфта: {soc}%</b>\n\n"
                    f"Запас ходу обмежений. Просимо максимально скоротити "
                    f"використання ліфта і за можливості йти сходами.")
             send_telegram_message(msg, silent=False)
 
-        elif new_state == 1 and current_state_level < 1:
+        elif new_tg_state == 1 and current_tg_state < 1:
             msg = (f"🟡 <b>Увага! Ліфт працює від акумуляторів (Заряд: {soc}%).</b>\n\n"
                    f"Будь ласка, користуйтеся ним лише за крайньої потреби. Економте заряд!")
             send_telegram_message(msg, silent=True)
 
-        elif new_state == 0:
+        elif new_tg_state == 0:
             logging.info("Батарея заряджена. Стан скинуто на 0 (тихо).")
 
         else:
-            logging.info(f"Батарея заряджається. Тихий перехід стану: {current_state_level} -> {new_state}")
+            logging.info(f"Батарея заряджається. Тихий перехід стану: {current_tg_state} -> {new_tg_state}")
 
-        state["state"] = new_state
+        state["tg_state"] = new_tg_state
 
     else:
-        logging.info("Стан не змінився. Дій не потрібно.")
+        logging.info("Стан Telegram не змінився. Дій не потрібно.")
 
-    # 4. Зберігаємо завжди — щоб не втратити оновлений токен
-    if soc != "OFFLINE":
+    # 5. Зберігаємо завжди — щоб не втратити оновлений токен і дати дані для Дашборда
+    state["state"] = dash_state  # Дашборд читає саме цей ключ!
+    if inverter_data != "OFFLINE":
         state["last_soc"] = soc
         state["last_update"] = int(time.time())
     save_state(state)
