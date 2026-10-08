@@ -189,7 +189,14 @@ async function loadData() {
 
     // Значок статусу
     const badge = document.getElementById("badge");
-    badge.textContent = info.label;
+    let currentLabel = info.label;
+    
+    // Якщо є мережа (st === 0) і акумулятор не повний (< 100)
+    if (st === 0 && soc < 100 && soc !== null) {
+      currentLabel = "⚡ Мережа (Заряджається)";
+    }
+    
+    badge.textContent = currentLabel;
     badge.className = "status-badge " + info.cls;
 
     // Час оновлення
