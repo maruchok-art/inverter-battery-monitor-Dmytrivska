@@ -103,6 +103,14 @@ def fetch_soc_data(token):
         if not data_list:
             return None
         device_data = data_list[0]
+
+        # === ТЕСТОВИЙ БЛОК ЛОГУВАННЯ ===
+        logging.info("--- ПОЧАТОК ДАНИХ ІНВЕРТОРА ---")
+        for item in device_data.get("dataList", []):
+            logging.info(f"Ключ: {item.get('key')} = {item.get('value')}")
+        logging.info("--- КІНЕЦЬ ДАНИХ ІНВЕРТОРА ---")
+        # ===============================
+
         if str(device_data.get("deviceState", "")) == "2":
             return None
 
@@ -114,7 +122,6 @@ def fetch_soc_data(token):
     except Exception as e:
         logging.error(f"Помилка запиту даних: {e}")
         return None
-
 
 def get_battery_soc_with_retry(state, max_retries=3, delay=15):
     for attempt in range(max_retries):
