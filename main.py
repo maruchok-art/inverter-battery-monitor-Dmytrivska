@@ -24,6 +24,10 @@ API_URL = "https://eu1-developer.deyecloud.com"
 # Час життя токена (12 годин)
 TOKEN_TTL = 43200
 
+# Мінімальна напруга мережі (В), при якій вважаємо, що мережа є.
+# Беремо з запасом вище за межу відключення інвертора: краще зайва тривога, ніж пропущена.
+GRID_MIN_V = 190
+
 
 def send_telegram_message(text, silent=False):
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
@@ -107,18 +111,24 @@ def fetch_inverter_data(token):
             return "OFFLINE"
 
         soc = None
-        grid_v = 230.0 # Дефолтне значення про всяк випадок
+        grid_vs = []  # напруга по фазах L1, L2, L3
 
         for item in device_data.get("dataList", []):
             key = str(item.get("key", "")).upper()
             if key in ["SOC", "BATTERY_SOC", "BMS_SOC"]:
                 soc = float(item.get("value", 100))
-            elif key == "GRIDVOLTAGEL1":
-                grid_v = float(item.get("value", 0))
+            elif key in ["GRIDVOLTAGEL1", "GRIDVOLTAGEL2", "GRIDVOLTAGEL3"]:
+                try:
+                    grid_vs.append(float(item.get("value", 0)))
+                except (TypeError, ValueError):
+                    pass
 
         if soc is None:
             return None
-            
+
+        # Найменша напруга з трьох фаз. None — якщо інвертор не віддав жодної
+        # (тоді мережу вважаємо невідомою, а не наявною).
+        grid_v = min(grid_vs) if grid_vs else None
         return {"soc": soc, "grid_v": grid_v}
     except Exception as e:
         logging.error(f"Помилка запиту даних: {e}")
@@ -162,7 +172,7 @@ def main():
     current_tg_state = state.get("tg_state", state.get("state", 0))
 
     inverter_data = get_inverter_data_with_retry(state)
-    
+
     if inverter_data == "OFFLINE":
         soc = state.get("last_soc", "Невідомо")
         logging.info(f"Статус: OFFLINE. Поточний рівень тривоги TG: {current_tg_state}")
@@ -171,10 +181,17 @@ def main():
     else:
         soc = inverter_data["soc"]
         grid_v = inverter_data["grid_v"]
-        logging.info(f"SOC: {soc}%, Напруга: {grid_v}V, Тривога TG: {current_tg_state}")
+        grid_ok = grid_v is not None and grid_v >= GRID_MIN_V
+        logging.info(
+            f"SOC: {soc}%, Мін. напруга мережі: {grid_v}V "
+            f"(мережа {'є' if grid_ok else 'немає або невідомо'}), Тривога TG: {current_tg_state}"
+        )
 
-        # --- 1. Логіка ТІЛЬКИ для ТЕЛЕГРАМУ (Абсолютно як було у main_2.py) ---
-        if soc <= 30:
+        # --- 1. Логіка для ТЕЛЕГРАМУ ---
+        # Поки мережа є, ліфт живиться від неї, тому тривог за зарядом немає.
+        if grid_ok:
+            new_tg_state = 0
+        elif soc <= 30:
             new_tg_state = 3
         elif soc <= 50:
             new_tg_state = 2
@@ -183,15 +200,18 @@ def main():
         else:
             new_tg_state = 0
 
-        # --- 2. Логіка ТІЛЬКИ для ДАШБОРДА (Відображає реальну напругу) ---
-        if grid_v < 100:  # Світла немає
-            if soc <= 30: dash_state = 3
-            elif soc <= 50: dash_state = 2
-            else: dash_state = 1
-        else:  # Світло є
+        # --- 2. Логіка для ДАШБОРДА (відображає реальну напругу) ---
+        if grid_ok:  # Світло є
             dash_state = 0
+        else:  # Світла немає
+            if soc <= 30:
+                dash_state = 3
+            elif soc <= 50:
+                dash_state = 2
+            else:
+                dash_state = 1
 
-    # 3. Якщо були в стані OFFLINE, а зараз отримали реальні дані — повідомляємо про відновлення (Як у main_2.py)
+    # 3. Якщо були в стані OFFLINE, а зараз отримали реальні дані — повідомляємо про відновлення
     if current_tg_state == 4 and new_tg_state != 4:
         msg = (f"✅ <b>Зв'язок з інвертором відновлено!</b>\n\n"
                f"Поточний заряд акумулятора ліфта: <b>{soc}%</b>")
@@ -199,7 +219,7 @@ def main():
         current_tg_state = 0
         state["tg_state"] = 0
 
-    # 4. Якщо стан змінився — реагуємо (Як у main_2.py)
+    # 4. Якщо стан змінився — реагуємо
     if new_tg_state != current_tg_state:
 
         if new_tg_state == 4:
@@ -225,7 +245,7 @@ def main():
             send_telegram_message(msg, silent=True)
 
         elif new_tg_state == 0:
-            logging.info("Батарея заряджена. Стан скинуто на 0 (тихо).")
+            logging.info("Мережа є або батарея заряджена. Стан скинуто на 0 (тихо).")
 
         else:
             logging.info(f"Батарея заряджається. Тихий перехід стану: {current_tg_state} -> {new_tg_state}")
