@@ -4,6 +4,8 @@ import os
 import time
 import json
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Професійне логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,8 +30,19 @@ TOKEN_TTL = 43200
 # Беремо з запасом вище за межу відключення інвертора: краще зайва тривога, ніж пропущена.
 GRID_MIN_V = 180
 
+# Тихі сповіщення вночі (київський час): повідомлення є в чаті, але без звуку
+QUIET_START = 23  # з 23:00
+QUIET_END = 7     # до 07:00
+
+
+def is_quiet_time():
+    hour = datetime.now(ZoneInfo("Europe/Kiev")).hour
+    return hour >= QUIET_START or hour < QUIET_END
+
 
 def send_telegram_message(text, silent=False):
+    if is_quiet_time():
+        silent = True
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_notification": silent}
     try:
