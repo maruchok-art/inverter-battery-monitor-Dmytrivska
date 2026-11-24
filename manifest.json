@@ -1,9 +1,10 @@
 {
-  "name": "Резервне живлення · Dmytrivska",
-  "short_name": "Ліфт Dmytrivska",
   "id": "/inverter-battery-monitor-Dmytrivska/dashboard.html",
-  "description": "Моніторинг заряду акумулятора",
+  "name": "Резервне живлення · Дмитрівська",
+  "short_name": "Живлення",
+  "description": "Заряд резервних акумуляторів будинку: ліфт, насоси води, опалення",
   "start_url": "/inverter-battery-monitor-Dmytrivska/dashboard.html",
+  "scope": "/inverter-battery-monitor-Dmytrivska/",
   "display": "standalone",
   "background_color": "#0f1117",
   "theme_color": "#1a1d2e",
@@ -12,13 +13,20 @@
     {
       "src": "icon.png",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
     },
     {
       "src": "icon.png",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
-  ],
-  "scope": "/inverter-battery-monitor-Dmytrivska/"
+  ]
 }
