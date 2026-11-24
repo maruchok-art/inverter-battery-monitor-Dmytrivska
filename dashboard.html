@@ -99,15 +99,40 @@
   .status-danger { background: #3a1010; color: #f87171; }
   .status-offline{ background: #2a2a2a; color: #9ca3af; }
 
-  .meta {
-    font-size: 0.8rem;
-    color: #555;
-    margin-top: 20px;
+  /* Блок "коли оновлено" — одразу під статусом, добре видно */
+  .fresh {
+    background: #23263a;
+    border-radius: 14px;
+    padding: 14px 16px;
+  }
+  .fresh-main {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: #e5e7eb;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+  .fresh-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #6b7280;
+    flex-shrink: 0;
+  }
+  .fresh-dot.ok    { background: #4ade80; }
+  .fresh-dot.stale { background: #fb923c; }
+  .fresh-time {
+    font-size: 0.95rem;
+    color: #9ca3af;
+    margin-top: 6px;
   }
 
+  /* Кнопка виклику консьєржа */
   .sos-btn {
     display: block;
-    margin-top: 24px;
+    margin-top: 20px;
     background: #dc2626;
     color: #fff;
     text-decoration: none;
@@ -142,15 +167,21 @@
 
   <div id="badge" class="status-badge status-offline">Завантаження...</div>
 
-  <div class="meta" id="updated">Оновлення...</div>
+  <div class="fresh">
+    <div class="fresh-main"><span class="fresh-dot" id="fresh-dot"></span><span id="fresh-ago">Завантаження...</span></div>
+    <div class="fresh-time" id="fresh-time"></div>
+  </div>
 
-  <a class="sos-btn" href="tel:+380990009182">Консьєрж</a>
+  <a class="sos-btn" href="tel:+380990009182">📞 Консьєрж</a>
   <div class="error" id="error"></div>
 </div>
 
 <script>
 const GIST_ID = "36b8bbe5b5a7b6f0b9b56666643a0b53";
 const GIST_URL = `https://api.github.com/gists/${GIST_ID}`;
+
+// Якщо дані старші за стільки хвилин — попереджаємо мешканців, що бот, можливо, не працює
+const STALE_MINUTES = 30;
 
 const STATES = {
   0: { label: "✅ Мережа, все добре",   cls: "status-ok",     color: "#4ade80" },
@@ -160,60 +191,94 @@ const STATES = {
   4: { label: "📡 Зв'язок втрачено",    cls: "status-offline",color: "#9ca3af" },
 };
 
+let lastData = null;      // останні отримані дані
+let lastFetchAt = 0;      // коли сторінка востаннє зверталась за даними
+
+// "щойно", "7 хв тому", "2 год тому"
+function agoText(ts) {
+  const sec = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (sec < 60) return "щойно";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} хв тому`;
+  const h = Math.floor(min / 60);
+  if (h >= 24) return "понад добу тому";
+  return `${h} год тому`;
+}
+
+// "сьогодні о 10:30", "вчора о 23:50" або дата
+function timeText(ts) {
+  const d = new Date(ts * 1000);
+  const hm = d.toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" });
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const day = new Date(d); day.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((today - day) / 86400000);
+  if (diffDays === 0) return `сьогодні о ${hm}`;
+  if (diffDays === 1) return `вчора о ${hm}`;
+  return d.toLocaleDateString("uk-UA") + ` о ${hm}`;
+}
+
+// Малює сторінку з останніх даних (викликається і після завантаження, і щохвилини)
+function render() {
+  if (!lastData) return;
+  const soc  = lastData.last_soc ?? null;
+  const st   = lastData.state ?? 0;
+  const ts   = lastData.last_update ?? null;
+  const info = STATES[st] ?? STATES[0];
+  const stale = ts !== null && st !== 4 &&
+                (Date.now() / 1000 - ts) > STALE_MINUTES * 60;
+
+  // Кільце із зарядом
+  const socEl = document.getElementById("soc-value");
+  const ring  = document.getElementById("ring");
+  if (soc !== null && st !== 4) {
+    socEl.textContent = Math.round(soc);
+    ring.style.strokeDashoffset = 465 - (soc / 100) * 465;
+    ring.style.stroke = stale ? "#9ca3af" : info.color;
+  } else {
+    socEl.textContent = "—";
+    ring.style.strokeDashoffset = 465;
+  }
+
+  // Статус
+  let label = info.label;
+  if (st === 0 && soc !== null && soc < 100) label = "⚡ Мережа (Заряджається)";
+  if (stale) label = "⚠️ Дані застарілі";
+  const badge = document.getElementById("badge");
+  badge.textContent = label;
+  badge.className = "status-badge " + (stale ? "status-offline" : info.cls);
+
+  // Коли оновлено
+  if (ts) {
+    document.getElementById("fresh-ago").textContent = "Оновлено " + agoText(ts);
+    document.getElementById("fresh-time").textContent = timeText(ts);
+    document.getElementById("fresh-dot").className = "fresh-dot " + (stale ? "stale" : "ok");
+  }
+}
+
 async function loadData() {
-  document.getElementById("error").textContent = "";
+  lastFetchAt = Date.now();
   try {
     const res = await fetch(`${GIST_URL}?nocache=${new Date().getTime()}`);
     if (!res.ok) throw new Error("HTTP " + res.status);
     const gist = await res.json();
-    const data = JSON.parse(gist.files["state.json"].content);
-
-    const soc   = data.last_soc ?? null;
-    const st    = data.state ?? 0;
-    const ts    = data.last_update ?? null;
-    const info  = STATES[st] ?? STATES[0];
-
-    // SOC відсоток
-    const socEl = document.getElementById("soc-value");
-    const ring  = document.getElementById("ring");
-    if (soc !== null && st !== 4) {
-      socEl.textContent = Math.round(soc);
-      const circumference = 465;
-      const offset = circumference - (soc / 100) * circumference;
-      ring.style.strokeDashoffset = offset;
-      ring.style.stroke = info.color;
-    } else {
-      socEl.textContent = "—";
-      ring.style.strokeDashoffset = 465;
-    }
-
-    // Значок статусу
-    const badge = document.getElementById("badge");
-    let currentLabel = info.label;
-    
-    // Якщо є мережа (st === 0) і акумулятор не повний (< 100)
-    if (st === 0 && soc < 100 && soc !== null) {
-      currentLabel = "⚡ Мережа (Заряджається)";
-    }
-    
-    badge.textContent = currentLabel;
-    badge.className = "status-badge " + info.cls;
-
-    // Час оновлення
-    if (ts) {
-      const d = new Date(ts * 1000);
-      document.getElementById("updated").textContent =
-        "Дані станом на: " + d.toLocaleString("uk-UA");
-    }
-
+    lastData = JSON.parse(gist.files["state.json"].content);
+    document.getElementById("error").textContent = "";
+    render();
   } catch (e) {
-    document.getElementById("error").textContent = "Помилка завантаження: " + e.message;
+    // Старі дані лишаються на екрані, лише показуємо помилку
+    document.getElementById("error").textContent = "Не вдалося оновити: " + e.message;
   }
 }
 
 loadData();
-// Автооновлення кожні 10 хвилини
+// Нові дані — кожні 10 хвилин (бот теж оновлює їх раз на 10 хвилин)
 setInterval(loadData, 600000);
+// "N хв тому" перераховуємо щохвилини без звернення до сервера
+setInterval(render, 60000);
+// Коли мешканець повертається до відкритої сторінки — одразу підтягуємо свіжі дані
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && Date.now() - lastFetchAt > 60000) loadData();
+});
 </script>
 </body>
 </html>
