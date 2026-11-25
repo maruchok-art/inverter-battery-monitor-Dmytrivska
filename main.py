@@ -1,6 +1,7 @@
 import requests
 import hashlib
 import os
+import sys
 import time
 import json
 import logging
@@ -34,9 +35,20 @@ GRID_MIN_V = 180
 # Захищає від повторних повідомлень, коли напруга "скаче" біля порогу.
 GRID_OK_RUNS_TO_RESET = 2
 
-# Скільки запусків поспіль Deye має не відповідати, щоб повідомити "втрачено зв'язок".
-# Захищає від хибних тривог через разовий збій хмари Deye.
-API_FAILS_TO_ALERT = 2
+# Скільки запусків поспіль не має свіжих даних (хмара Deye не відповідає АБО каже,
+# що інвертор не на зв'язку), щоб повідомити "втрачено зв'язок".
+# Захищає від хибних тривог через разові збої.
+NO_DATA_RUNS_TO_ALERT = 2
+
+# Рівні тривоги в Telegram (tg_state):
+#   0 — тиша, 1 — 🟡 ≤90%, 2 — 🟠 ≤50%, 3 — 🔴 ≤30%, 5 — 🆘 ≤15%, 4 — немає зв'язку.
+# Порядок "серйозності" рівнів заряду (4 сюди не входить — це окремий стан):
+LEVEL_RANK = {0: 0, 1: 1, 2: 2, 3: 3, 5: 4}
+
+# Проблеми, які має виправити адміністратор (пароль, токени, Telegram).
+# Якщо список не порожній — запуск завершується з помилкою (червоний хрестик у GitHub
+# і лист на пошту), щоб про проблему дізнався адміністратор, а не мешканці.
+ADMIN_PROBLEMS = []
 
 
 def send_telegram_message(text, silent=False):
@@ -48,29 +60,37 @@ def send_telegram_message(text, silent=False):
             res = requests.post(url, json=payload, timeout=10)
             if res.status_code == 200:
                 return True
-            logging.warning(f"Telegram відповів кодом {res.status_code} (спроба {attempt+1}/3)")
+            logging.warning(f"Telegram відповів кодом {res.status_code}: {res.text[:200]} (спроба {attempt+1}/3)")
         except Exception as e:
             logging.warning(f"Помилка відправки в Telegram (спроба {attempt+1}/3): {e}")
         time.sleep(3)
     logging.error("Не вдалося надіслати повідомлення в Telegram. Спробуємо наступного запуску.")
+    ADMIN_PROBLEMS.append("Telegram не прийняв повідомлення")
     return False
 
 
 # --- РОБОТА З GITHUB GIST ---
 def get_state():
-    default_state = {"state": 0, "tg_state": 0}
-    try:
-        headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-        res = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
-        if res.status_code == 200:
-            content = res.json()["files"]["state.json"]["content"]
-            data = json.loads(content)
-            if not data:
-                return default_state
-            return data
-    except Exception as e:
-        logging.warning(f"Помилка читання Gist: {e}")
-    return default_state
+    """Повертає стан бота або None, якщо файл стану прочитати не вдалося.
+
+    Важливо розрізняти "файл порожній" і "файл не прочитався": якщо вдавати, що стан
+    порожній, бот "забуде", що вже повідомляв, і почне слати ті самі повідомлення щоразу.
+    """
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    for attempt in range(3):
+        try:
+            res = requests.get(f"https://api.github.com/gists/{GIST_ID}", headers=headers, timeout=10)
+            if res.status_code == 200:
+                content = res.json()["files"]["state.json"]["content"]
+                data = json.loads(content) if content and content.strip() else {}
+                if not isinstance(data, dict):
+                    raise ValueError("state.json має бути об'єктом {...}")
+                return data or {"state": 0, "tg_state": 0}
+            logging.warning(f"GitHub не віддав файл стану: код {res.status_code} (спроба {attempt+1}/3)")
+        except Exception as e:
+            logging.warning(f"Помилка читання файлу стану (спроба {attempt+1}/3): {e}")
+        time.sleep(3)
+    return None
 
 
 def save_state(state_dict):
@@ -95,6 +115,7 @@ def save_state(state_dict):
             logging.warning(f"Помилка запису в Gist (спроба {attempt+1}/3): {e}")
         time.sleep(3)
     logging.error("КРИТИЧНО: Не вдалося зберегти стан.")
+    ADMIN_PROBLEMS.append("не вдалося зберегти файл стану")
 
 
 # --- ЗБЕРІГАННЯ КЛЮЧА DEYE В ПРИХОВАНОМУ GIST ---
@@ -139,18 +160,24 @@ def save_cached_token(token):
 
 # --- ЛОГІКА API DEYE ---
 def fetch_new_token():
+    """Повертає (ключ, відмова).
+    відмова=True — Deye свідомо не пустив (пароль, App ID/Secret тощо): це справа адміністратора.
+    відмова=False і ключ None — просто не вдалося достукатись (мережа), можна спробувати ще."""
     if not SOLARMAN_PASSWORD:
-        return None
+        logging.error("Не задано пароль Deye (секрет SOLARMAN_PASSWORD).")
+        return None, True
     pwd_hash = hashlib.sha256(SOLARMAN_PASSWORD.encode('utf-8')).hexdigest()
     auth_url = f"{API_URL}/v1.0/account/token?appId={SOLARMAN_APP_ID}"
     payload = {"appSecret": SOLARMAN_APP_SECRET, "email": SOLARMAN_EMAIL, "password": pwd_hash}
     try:
         res = requests.post(auth_url, json=payload, timeout=10).json()
-        if res.get("success"):
-            return res.get("accessToken", "")
+        if res.get("success") and res.get("accessToken"):
+            return res["accessToken"], False
+        logging.error(f"Deye не пустив бота: код {res.get('code')}, повідомлення: {res.get('msg')}")
+        return None, True
     except Exception as e:
         logging.error(f"Помилка генерації токена: {e}")
-    return None
+    return None, False
 
 
 def fetch_inverter_data(token):
@@ -164,10 +191,13 @@ def fetch_inverter_data(token):
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10).json()
         if not res.get("success"):
+            # Записуємо, що саме сказав Deye, — без цього неможливо зрозуміти причину
+            logging.warning(f"Deye відхилив запит даних: код {res.get('code')}, повідомлення: {res.get('msg')}")
             return "AUTH_ERROR"
 
-        data_list = res.get("deviceDataList", [])
+        data_list = res.get("deviceDataList") or []
         if not data_list:
+            logging.warning("Deye не повернув жодного пристрою (перевірте серійний номер DEVICE_SN).")
             return None
         device_data = data_list[0]
         if str(device_data.get("deviceState", "")) == "2":
@@ -176,19 +206,27 @@ def fetch_inverter_data(token):
         soc = None
         grid_vs = []  # напруга по фазах L1, L2, L3
 
-        for item in device_data.get("dataList", []):
+        for item in device_data.get("dataList") or []:
             key = str(item.get("key", "")).upper()
             if key in ["SOC", "BATTERY_SOC", "BMS_SOC"]:
-                # Ціле число, щоб у повідомленнях було "85%", а не "85.0%"
-                soc = round(float(item.get("value", 100)))
+                try:
+                    # Ціле число, щоб у повідомленнях було "85%", а не "85.0%".
+                    # Якщо значення немає — заряд НЕВІДОМИЙ (а не 100%).
+                    soc = round(float(item.get("value")))
+                except (TypeError, ValueError):
+                    pass
             elif key in ["GRIDVOLTAGEL1", "GRIDVOLTAGEL2", "GRIDVOLTAGEL3"]:
                 try:
-                    grid_vs.append(float(item.get("value", 0)))
+                    grid_vs.append(float(item.get("value")))
                 except (TypeError, ValueError):
                     pass
 
         if soc is None:
+            logging.warning("Deye не віддав рівень заряду (SOC).")
             return None
+
+        if not grid_vs:
+            logging.warning("Deye не віддав напругу мережі — вважаємо, що мережі немає (обережний варіант).")
 
         # Найменша напруга з трьох фаз. None — якщо інвертор не віддав жодної
         # (тоді мережу вважаємо невідомою, а не наявною).
@@ -201,21 +239,33 @@ def fetch_inverter_data(token):
 
 def get_inverter_data_with_retry(max_retries=3, delay=15):
     """Повертає дані, або "OFFLINE" (Deye каже: інвертор не на зв'язку),
-    або "API_ERROR" (не вдалося отримати відповідь від хмари Deye)."""
+    або "API_ERROR" (не вдалося отримати дані від хмари Deye)."""
     # Спершу пробуємо збережений ключ (з прихованого Gist). Новий у Deye беремо,
     # лише якщо збереженого немає, він старший за 12 годин або Deye його відхилив.
+    # За один запуск беремо НЕ БІЛЬШЕ ОДНОГО нового ключа: якщо Deye відхиляє і свіжий,
+    # то справа не в ключі, і "смикати" Deye далі немає сенсу.
     # Якщо TOKEN_GIST_ID не налаштовано — просто беремо новий ключ на кожному запуску.
     token = load_cached_token()
+    new_tokens = 0
     for attempt in range(max_retries):
         if not token:
+            if new_tokens >= 1:
+                logging.error("Deye відхиляє запит навіть зі свіжим ключем — справа не в ключі.")
+                ADMIN_PROBLEMS.append("Deye відхиляє запит даних навіть зі свіжим ключем")
+                return "API_ERROR"
             logging.info("Отримуємо новий токен...")
-            token = fetch_new_token()
-            save_cached_token(token)
+            token, rejected = fetch_new_token()
+            if rejected:
+                ADMIN_PROBLEMS.append("Deye не приймає вхід (пароль / App ID / App Secret)")
+                return "API_ERROR"
+            if token:
+                new_tokens += 1
+                save_cached_token(token)
 
         if token:
             data = fetch_inverter_data(token)
             if data == "AUTH_ERROR":
-                logging.info("Токен відхилено. Оновлюємо...")
+                logging.info("Deye відхилив запит із цим ключем. Пробуємо новий...")
                 token = ""
                 continue
             elif data == "OFFLINE":
@@ -223,7 +273,7 @@ def get_inverter_data_with_retry(max_retries=3, delay=15):
             elif data is not None:
                 return data
 
-        logging.warning(f"API Deye не відповів (спроба {attempt+1}/3). Чекаємо {delay} сек...")
+        logging.warning(f"API Deye не відповів (спроба {attempt+1}/{max_retries}). Чекаємо {delay} сек...")
         if attempt < max_retries - 1:
             time.sleep(delay)
 
@@ -232,21 +282,34 @@ def get_inverter_data_with_retry(max_retries=3, delay=15):
 
 # --- ГОЛОВНА ЛОГІКА ---
 def main():
+    ADMIN_PROBLEMS.clear()
+
     state = get_state()
+    if state is None:
+        # Не знаємо, що вже повідомляли, — тому мовчимо, щоб не слати повтори всім мешканцям.
+        logging.error("КРИТИЧНО: не вдалося прочитати файл стану. Повідомлення не надсилаємо, "
+                      "щоб не дублювати їх. Перевірте секрети GIST_ID і PERSONAL_GITHUB_TOKEN.")
+        sys.exit(1)
+
     # Міграція: якщо tg_state ще немає в пам'яті, беремо старе значення state
     current_tg_state = state.get("tg_state", state.get("state", 0))
 
     inverter_data = get_inverter_data_with_retry()
 
-    # 0. Разовий збій хмари Deye — ще не привід лякати мешканців.
-    if inverter_data == "API_ERROR":
+    # 0. Немає свіжих даних (хмара Deye не відповіла АБО каже, що інвертор офлайн).
+    #    Разовий збій — ще не привід лякати мешканців: чекаємо ще один запуск.
+    #    (Старий ключ лічильника "api_fails" лишаємо, щоб не скидати збережений стан.)
+    if inverter_data in ("API_ERROR", "OFFLINE"):
         fails = state.get("api_fails", 0) + 1
         state["api_fails"] = fails
-        if fails < API_FAILS_TO_ALERT:
-            logging.warning(f"Deye не відповів ({fails} раз поспіль). Нічого не змінюємо, чекаємо наступного запуску.")
+        reason = "хмара Deye не відповіла" if inverter_data == "API_ERROR" else "Deye каже, що інвертор не на зв'язку"
+        if fails < NO_DATA_RUNS_TO_ALERT:
+            logging.warning(f"Немає свіжих даних ({reason}), {fails} раз поспіль. "
+                            f"Нічого не змінюємо, чекаємо наступного запуску.")
             save_state(state)
+            finish()
             return
-        logging.warning(f"Deye не відповідає {fails} рази поспіль. Вважаємо, що зв'язку немає.")
+        logging.warning(f"Немає свіжих даних ({reason}) {fails} рази поспіль. Вважаємо, що зв'язку немає.")
         inverter_data = "OFFLINE"
     else:
         state["api_fails"] = 0
@@ -279,16 +342,23 @@ def main():
                 # Світло щойно повернулось — чекаємо ще один запуск, щоб переконатися,
                 # що воно не зникне знову (інакше буде повторне повідомлення).
                 new_tg_state = current_tg_state
-        elif soc <= 15:
-            new_tg_state = 5  # дуже критично: інвертор вимикається на 10%
-        elif soc <= 30:
-            new_tg_state = 3
-        elif soc <= 50:
-            new_tg_state = 2
-        elif soc <= 90:
-            new_tg_state = 1
         else:
-            new_tg_state = 0
+            if soc <= 15:
+                new_tg_state = 5  # дуже критично: інвертор вимикається на 10%
+            elif soc <= 30:
+                new_tg_state = 3
+            elif soc <= 50:
+                new_tg_state = 2
+            elif soc <= 90:
+                new_tg_state = 1
+            else:
+                new_tg_state = 0
+
+            # Під час відключення рівень тривоги лише зростає. Якщо заряд на мить
+            # "підскочить" на 1% (90→91→90), повторного повідомлення не буде.
+            # Скидається рівень тільки після повернення світла (див. вище).
+            if current_tg_state in (1, 2, 3, 5):
+                new_tg_state = max(new_tg_state, current_tg_state, key=LEVEL_RANK.get)
 
         # --- 2. Логіка для ДАШБОРДА (відображає реальну напругу, без затримок) ---
         if grid_ok:  # Світло є
@@ -316,9 +386,9 @@ def main():
         sent = True  # якщо повідомлення не потрібне, вважаємо, що все гаразд
 
         if new_tg_state == 4:
-            msg = (f"⚠️ <b>Увага! Втрачено зв'язок з інвертором.</b>\n\n"
-                   f"Дані про заряд не оновлюються (можливо, зник інтернет або живлення роутера). "
-                   f"Актуальний заряд невідомий, тому будьте обережні з ліфтом.")
+            msg = ("⚠️ <b>Увага! Втрачено зв'язок з інвертором.</b>\n\n"
+                   "Дані про заряд не оновлюються (можливо, зник інтернет або живлення роутера). "
+                   "Актуальний заряд невідомий, тому будьте обережні з ліфтом.")
             sent = send_telegram_message(msg)
 
         elif new_tg_state == 5 and current_tg_state < 5:
@@ -341,7 +411,7 @@ def main():
             logging.info("Мережа є або батарея заряджена. Стан скинуто на 0 (тихо).")
 
         else:
-            logging.info(f"Батарея заряджається. Тихий перехід стану: {current_tg_state} -> {new_tg_state}")
+            logging.info(f"Тихий перехід стану: {current_tg_state} -> {new_tg_state}")
 
         # Запам'ятовуємо новий рівень, тільки якщо повідомлення справді дійшло.
         # Інакше наступний запуск спробує надіслати його знову.
@@ -357,6 +427,15 @@ def main():
         state["last_soc"] = soc
         state["last_update"] = int(time.time())
     save_state(state)
+    finish()
+
+
+def finish():
+    """Якщо є проблеми для адміністратора — завершуємо запуск з помилкою,
+    щоб GitHub показав червоний хрестик і надіслав лист на пошту."""
+    if ADMIN_PROBLEMS:
+        logging.error("ПОТРІБНА УВАГА АДМІНІСТРАТОРА: " + "; ".join(ADMIN_PROBLEMS))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
