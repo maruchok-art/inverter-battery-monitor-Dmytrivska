@@ -11,11 +11,16 @@ concurrency:
   group: elevator-bot
   cancel-in-progress: false
 
+# Вбудованому токену GitHub даємо мінімум прав: лише прочитати код бота.
+permissions:
+  contents: read
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    # Якщо щось зависло — зупиняємо через 5 хвилин (зазвичай запуск триває ~20 секунд)
-    timeout-minutes: 5
+    # Якщо щось зависло — зупиняємо через 8 хвилин (зазвичай запуск триває ~20 секунд,
+    # найгірший випадок, коли все відповідає повільно, — близько 5 хвилин)
+    timeout-minutes: 8
 
     steps:
     - name: Checkout repository
@@ -27,7 +32,8 @@ jobs:
         python-version: '3.12'
 
     - name: Install dependencies
-      run: pip install requests
+      # Версія закріплена: бібліотека бачить паролі, тож не ставимо щоразу «найновішу» без перевірки
+      run: pip install requests==2.34.2
 
     - name: Run battery check script
       env:
