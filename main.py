@@ -142,7 +142,10 @@ def load_cached_token():
 
 def save_cached_token(token):
     """Зберігає новий ключ у прихований Gist (не в публічний файл стану!)."""
-    if not TOKEN_GIST_ID or not token:
+    if not token:
+        return
+    if not TOKEN_GIST_ID:
+        ADMIN_PROBLEMS.append("не задано секрет TOKEN_GIST_ID — бот щоразу бере в Deye новий ключ")
         return
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -150,12 +153,19 @@ def save_cached_token(token):
         "Content-Type": "application/json"
     }
     payload = {"files": {"token.json": {"content": json.dumps({"token": token, "token_time": int(time.time())})}}}
-    try:
-        res = requests.patch(f"https://api.github.com/gists/{TOKEN_GIST_ID}", headers=headers, json=payload, timeout=10)
-        res.raise_for_status()
-        logging.info("Новий ключ Deye збережено в прихованому Gist.")
-    except Exception as e:
-        logging.warning(f"Не вдалося зберегти ключ у прихований Gist: {e}")
+    for attempt in range(3):
+        try:
+            res = requests.patch(f"https://api.github.com/gists/{TOKEN_GIST_ID}", headers=headers, json=payload, timeout=10)
+            res.raise_for_status()
+            logging.info("Новий ключ Deye збережено в прихованому Gist.")
+            return
+        except Exception as e:
+            logging.warning(f"Не вдалося зберегти ключ у прихований Gist (спроба {attempt+1}/3): {e}")
+        if attempt < 2:
+            time.sleep(3)
+    # Якщо так буде постійно, бот братиме новий ключ щоразу (144 рази на добу) —
+    # Deye може це не сподобатись, тож повідомляємо адміністратора.
+    ADMIN_PROBLEMS.append("не вдалося зберегти ключ Deye у прихований Gist")
 
 
 # --- ЛОГІКА API DEYE ---
@@ -386,9 +396,16 @@ def main():
         sent = True  # якщо повідомлення не потрібне, вважаємо, що все гаразд
 
         if new_tg_state == 4:
-            msg = ("⚠️ <b>Увага! Втрачено зв'язок з інвертором.</b>\n\n"
-                   "Дані про заряд не оновлюються (можливо, зник інтернет або живлення роутера). "
-                   "Актуальний заряд невідомий, тому будьте обережні з ліфтом.")
+            if current_tg_state == 5:
+                # Перед цим заряд був критичний — найімовірніше, інвертор вимкнувся при 10%,
+                # а не зник інтернет. Кажемо мешканцям про це прямо.
+                msg = ("⚠️ <b>Увага! Втрачено зв'язок з інвертором.</b>\n\n"
+                       "Перед цим заряд був критичний, тож, найімовірніше, акумулятори розрядились "
+                       "і інвертор вимкнувся. Ліфт, насоси й опалення можуть не працювати до появи світла.")
+            else:
+                msg = ("⚠️ <b>Увага! Втрачено зв'язок з інвертором.</b>\n\n"
+                       "Дані про заряд не оновлюються (можливо, зник інтернет або живлення роутера). "
+                       "Актуальний заряд невідомий, тому будьте обережні з ліфтом.")
             sent = send_telegram_message(msg)
 
         elif new_tg_state == 5 and current_tg_state < 5:
