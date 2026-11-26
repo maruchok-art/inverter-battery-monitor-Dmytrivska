@@ -188,6 +188,11 @@
 <script>
 const GIST_ID = "36b8bbe5b5a7b6f0b9b56666643a0b53";
 const GIST_URL = `https://api.github.com/gists/${GIST_ID}`;
+// Запасна адреса того самого файлу. Основна (api.github.com) дозволяє лише 60 запитів
+// на годину з однієї інтернет-адреси, а мобільні оператори часто дають одну адресу
+// багатьом абонентам. Якщо основна не відповіла — беремо файл звідси.
+const GIST_OWNER = "maruchok-art";
+const RAW_URL = `https://gist.githubusercontent.com/${GIST_OWNER}/${GIST_ID}/raw/state.json`;
 
 // Якщо дані старші за стільки хвилин — попереджаємо мешканців, що бот, можливо, не працює
 const STALE_MINUTES = 30;
@@ -235,6 +240,7 @@ function render() {
   const info = STATES[st] ?? STATES[0];
   const stale = ts !== null && st !== 4 &&
                 (Date.now() / 1000 - ts) > STALE_MINUTES * 60;
+  const warnDot = stale || st === 4;   // помаранчева крапка: дані давні або зв'язку немає
 
   // Кільце із зарядом
   const socEl = document.getElementById("soc-value");
@@ -252,30 +258,53 @@ function render() {
   let label = info.label;
   if (st === 0 && soc !== null && soc < 100) label = "⚡ Мережа (Заряджається)";
   if (stale) label = "⚠️ Дані застарілі";
+  const waiting = ts === null && st !== 4;   // нова установка: бот ще не записав жодних даних
+  if (waiting) label = "⏳ Чекаю перших даних";
   const badge = document.getElementById("badge");
   badge.textContent = label;
-  badge.className = "status-badge " + (stale ? "status-offline" : info.cls);
+  badge.className = "status-badge " + (stale || waiting ? "status-offline" : info.cls);
 
   // Коли оновлено
   if (ts) {
     document.getElementById("fresh-ago").textContent = "Оновлено " + agoText(ts);
     document.getElementById("fresh-time").textContent = timeText(ts);
-    document.getElementById("fresh-dot").className = "fresh-dot " + (stale ? "stale" : "ok");
+    document.getElementById("fresh-dot").className = "fresh-dot " + (warnDot ? "stale" : "ok");
+  }
+}
+
+// Отримує стан: спершу з основної адреси, якщо не вийшло — із запасної
+async function fetchState() {
+  try {
+    const res = await fetch(`${GIST_URL}?nocache=${Date.now()}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const gist = await res.json();
+    return JSON.parse(gist.files["state.json"].content);
+  } catch (e) {
+    console.warn("Основна адреса не відповіла:", e.message);
+    const res = await fetch(`${RAW_URL}?nocache=${Date.now()}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
   }
 }
 
 async function loadData() {
   lastFetchAt = Date.now();
   try {
-    const res = await fetch(`${GIST_URL}?nocache=${new Date().getTime()}`);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const gist = await res.json();
-    lastData = JSON.parse(gist.files["state.json"].content);
+    const data = await fetchState();
+    // Запасна адреса може віддати копію до 5 хв давнішу — не замінюємо новіші дані старішими
+    if (!lastData || (data.last_update ?? 0) >= (lastData.last_update ?? 0)) lastData = data;
     document.getElementById("error").textContent = "";
     render();
   } catch (e) {
-    // Старі дані лишаються на екрані, лише показуємо помилку
-    document.getElementById("error").textContent = "Не вдалося оновити: " + e.message;
+    console.warn("Не вдалося отримати дані:", e.message);
+    if (lastData) {
+      // Старі дані лишаються на екрані, лише попереджаємо
+      document.getElementById("error").textContent = "Не вдалося оновити — показано останні отримані дані.";
+    } else {
+      document.getElementById("badge").textContent = "📡 Немає даних";
+      document.getElementById("fresh-ago").textContent = "Немає з'єднання";
+      document.getElementById("error").textContent = "Сторінка спробує ще раз сама за кілька хвилин.";
+    }
   }
 }
 
